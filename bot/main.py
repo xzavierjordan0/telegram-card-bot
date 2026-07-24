@@ -73,7 +73,6 @@ async def get_or_create_user(telegram_id: int):
         session.close()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"✅ /start received from {update.effective_user.username}")
     await update.message.reply_text(
         "🎴 **Welcome to CardStore!**\n\n"
         "💰 USDT Payments | 🌍 Global Cards\n\n"
@@ -105,7 +104,6 @@ async def copy_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("✅ Address copied to clipboard!", show_alert=True)
 
 async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"✅ /catalog received from {update.effective_user.username}")
     keyboard = [
         [InlineKeyboardButton(text="🇺🇸 USA", callback_data="country_US")],
         [InlineKeyboardButton(text="🇨🇦 Canada", callback_data="country_CA")],
@@ -171,7 +169,6 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(response_text, reply_markup=reply_markup, parse_mode="Markdown")
     finally:
         session.close()
-
 
 async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -290,7 +287,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📋 **Available Commands:**\n\n/start - Welcome message\n/balance - Check USDT balance\n/topup - Get deposit address\n/catalog - Browse cards by country\n/bin - BIN lookup\n/history - View purchase history\n/help - Show this message\n\n*Admin Commands:*\n/stats - View store statistics\n/upload - Bulk upload cards\n/export - Export all cards to file", parse_mode="Markdown")
+    await update.message.reply_text("📋 **Available Commands:**\n\n/start - Welcome message\n/balance - Check USDT balance\n/topup - Get deposit address\n/catalog - Browse cards by country\n/bin - BIN lookup\n/history - View purchase history\n/help - Show this message\n\n*Admin Commands:*\n/stats - View store statistics\n/upload - Bulk upload cards\n/edit_price - Edit BIN prices\n/export - Export all cards to file", parse_mode="Markdown")
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update.effective_user.id)
@@ -307,13 +304,47 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
+async def admin_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    await update.message.reply_text("📝 **Edit BIN Prices**\n\nUsage: /edit_price BIN PRICE\n\nExample: /edit_price 414720 25\n\nThis will update ALL cards with BIN 414720 to $25 USDT")
+
+async def handle_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    session = SessionLocal()
+    try:
+        parts = update.message.text.split(' ')
+        if len(parts) < 3:
+            await update.message.reply_text("❌ Invalid format.\n\nUsage: /edit_price BIN PRICE")
+            return
+        bin_number = parts[1].strip()
+        try:
+            price = float(parts[2].strip())
+        except ValueError:
+            await update.message.reply_text("❌ Price must be a number.")
+            return
+        count = session.query(Card).filter(Card.bin == bin_number).count()
+        if count == 0:
+            await update.message.reply_text(f"❌ No cards found with BIN {bin_number}")
+            return
+        session.query(Card).filter(Card.bin == bin_number).update({'price': price})
+        session.commit()
+        await update.message.reply_text(f"✅ **Prices Updated!**\n\n🎴 BIN: {bin_number}\n💰 Price: ${price} USDT\n📊 Cards Updated: {count}", parse_mode="Markdown")
+    finally:
+        session.close()
+
 async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update.effective_user.id)
     if not user.is_admin:
         await update.message.reply_text("🔒 Admin command only!")
         return
     context.user_data['uploading'] = True
-    await update.message.reply_text("📦 **Bulk Upload via Telegram**\n\n📁 Send a card file (.txt, .csv, .dat, .log)\n✅ Cards will be sorted automatically\n\n⏳ Waiting for file...", parse_mode="Markdown")
+    await update.message.reply_text("📦 **Bulk Upload Cards**\n\n📁 Send a card file (.txt, .csv, .dat)\n\n**Accepted Formats:**\n- cc|mm|yy|cvv\n- cc,mm,yy,cvv\n- cc mm yy cvv\n- Any format with 4+ fields\n\n✅ Auto-detects format\n✅ Default price: $25 USDT\n✅ Default country: US\n✅ All cards marked as Naked (no billing)\n\n⏳ Waiting for file...", parse_mode="Markdown")
 
 async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update.effective_user.id)
@@ -348,48 +379,115 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     filename = document.file_name
     if filename.endswith(('.txt', '.csv', '.dat', '.log', '.tsv')):
         await update.message.reply_text("⏳ Downloading file...")
+        print(f"📁 Downloading file: {filename}")
         try:
             os.makedirs("uploads", exist_ok=True)
             file_path = f"uploads/{filename}"
             file = await context.bot.get_file(document.file_id)
             await file.download_to_drive(file_path)
+            print(f"✅ File downloaded to: {file_path}")
+            
+            # Check if file exists and get size
+            if not os.path.exists(file_path):
+                await update.message.reply_text(f"❌ File not found at: {file_path}")
+                context.user_data['uploading'] = False
+                return
+            file_size = os.path.getsize(file_path)
+            print(f"📊 File size: {file_size} bytes")
+            
             session = SessionLocal()
             try:
                 cards = []
                 success_count = 0
+                failed_count = 0
+                total_lines = 0
+                
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    for line in f:
+                    for line_num, line in enumerate(f, 1):
+                        total_lines += 1
                         line = line.strip()
                         if not line or line.startswith('#'):
                             continue
+                        
+                        # Auto-detect delimiter
                         delimiters = [',', '|', '\t', ' ']
                         delimiter = max(delimiters, key=lambda d: line.count(d))
                         parts = [p.strip() for p in line.split(delimiter)]
-                        if len(parts) >= 7:
+                        
+                        print(f"📝 Line {line_num}: {len(parts)} parts, delimiter: '{delimiter}'")
+                        
+                        # Parse cards - accept flexible formats
+                        card = None
+                        if len(parts) >= 4:
                             try:
+                                # Format: cc|mm|yy|cvv or cc,mm,yy,cvv
+                                card_number = parts[0]
+                                expiry_month = parts[1]
+                                expiry_year = parts[2]
+                                cvv = parts[3]
+                                
+                                # Validate card number (13-19 digits)
+                                if not card_number.isdigit() or len(card_number) < 13 or len(card_number) > 19:
+                                    failed_count += 1
+                                    print(f"⚠️ Line {line_num}: Invalid card number")
+                                    continue
+                                
+                                # Format expiry as MM/YY
+                                expiry = f"{expiry_month}/{expiry_year}"
+                                
+                                # BIN from first 6 digits
+                                bin_number = card_number[:6]
+                                
+                                # Default values
+                                country = parts[4] if len(parts) > 4 and len(parts[4]) == 2 else 'US'
+                                billing = parts[5] in ['1', 'True', 'yes', 'true'] if len(parts) > 5 else False  # Default naked
+                                price = float(parts[6]) if len(parts) > 6 and parts[6].replace('.', '').isdigit() else 25.0
+                                
                                 card = Card(
-                                    bin=parts[0],
-                                    number=parts[1],
-                                    expiry=parts[2],
-                                    cvv=parts[3],
-                                    country=parts[4] if len(parts) > 4 else 'US',
-                                    billing=parts[5] in ['1', 'True', 'yes', 'true'] if len(parts) > 5 else True,
-                                    price=float(parts[6]) if len(parts) > 6 else 25.0,
+                                    bin=bin_number,
+                                    number=card_number,
+                                    expiry=expiry,
+                                    cvv=cvv,
+                                    country=country,
+                                    billing=billing,
+                                    price=price,
                                     is_sold=False
                                 )
                                 cards.append(card)
                                 success_count += 1
-                            except ValueError:
-                                continue
-                session.bulk_insert_mappings(Card, [c.__dict__ for c in cards])
-                session.commit()
+                            except (ValueError, IndexError) as e:
+                                failed_count += 1
+                                print(f"❌ Line {line_num} parse error: {e}")
+                        else:
+                            failed_count += 1
+                            print(f"⚠️ Line {line_num}: Only {len(parts)} parts (need 4+)")
+                
+                print(f"✅ Cards to insert: {success_count}")
+                print(f"❌ Failed lines: {failed_count}")
+                
+                if success_count > 0:
+                    session.bulk_insert_mappings(Card, [c.__dict__ for c in cards])
+                    session.commit()
+                
                 total = session.query(Card).count()
                 available = session.query(Card).filter(Card.is_sold == False).count()
-                await update.message.reply_text(f"✅ **Upload Complete!**\n\n📊 Cards Uploaded: {success_count}\n📈 Total Cards: {total}\n📉 Available: {available}", parse_mode="Markdown")
+                
+                await update.message.reply_text(
+                    f"✅ **Upload Complete!**\n\n"
+                    f"📊 Cards Uploaded: {success_count}\n"
+                    f"❌ Failed Lines: {failed_count}\n"
+                    f"📈 Total Cards: {total}\n"
+                    f"📉 Available: {available}\n\n"
+                    f"📁 File: `{filename}`\n"
+                    f"📊 File Size: {file_size} bytes",
+                    parse_mode="Markdown"
+                )
                 context.user_data['uploading'] = False
+            
             except Exception as e:
                 import traceback
                 error_msg = traceback.format_exc()
+                print(f"❌ Upload error: {error_msg}")
                 if len(error_msg) > 3900:
                     error_msg = error_msg[:3900] + "...\n[Truncated]"
                 await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
@@ -397,9 +495,11 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 session.rollback()
             finally:
                 session.close()
+        
         except Exception as e:
             import traceback
             error_msg = traceback.format_exc()
+            print(f"❌ Download error: {error_msg}")
             if len(error_msg) > 3900:
                 error_msg = error_msg[:3900] + "...\n[Truncated]"
             await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
@@ -426,6 +526,7 @@ def main():
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Regex('^/bin '), handle_bin_search))
+    application.add_handler(MessageHandler(filters.Regex('^/edit_price '), handle_edit_price))
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
     application.add_handler(CallbackQueryHandler(order_bin_callback, pattern="^order_bin_"))
@@ -433,6 +534,7 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bin_order))
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("upload", admin_upload))
+    application.add_handler(CommandHandler("edit_price", admin_edit_price))
     application.add_handler(CommandHandler("export", admin_export))
     application.add_error_handler(error_handler)
     print("✅ Bot is running...")
