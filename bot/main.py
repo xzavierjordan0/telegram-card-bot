@@ -457,6 +457,34 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
+async def country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    country_code = query.data.split("_")[1]
+    
+    session = SessionLocal()
+    try:
+        if country_code == "ALL":
+            cards = session.query(Card).filter(Card.is_sold == False).limit(5).all()
+        else:
+            cards = session.query(Card).filter(Card.country == country_code, Card.is_sold == False).limit(5).all()
+        
+        if not cards:
+            await query.answer(f"📭 No {country_code} cards available.", show_alert=True)
+            return
+        
+        card_text = f"🎴 **{country_code} Cards Available**\n\n"
+        for card in cards:
+            card_text += (
+                f"🆔 ID: `{card.id}`\n"
+                f"🏦 BIN: `{card.bin}`\n"
+                f"💳 ****{card.number[-4:]}\n"
+                f"🏷️ Price: ${card.price} USDT\n\n"
+            )
+        
+        await query.edit_message_text(card_text, parse_mode="Markdown")
+    finally:
+        session.close()
+
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"✅ /history received from {update.effective_user.username}")
