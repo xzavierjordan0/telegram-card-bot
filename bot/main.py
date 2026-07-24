@@ -815,9 +815,9 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats_text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(text="📥 Export Cards", callback_data="admin_export")],
-                [InlineKeyboardButton(text="📤 Upload Cards", callback_data="admin_upload")],
-                [InlineKeyboardButton(text="[InlineKeyboardButton(text="📤 Upload Cards", callback_data="admin_upload")],
+                [InlineKeyboardButton(text="Export Cards", callback_data="admin_export")],
+                [InlineKeyboardButton(text="Upload Cards", callback_data="admin_upload")],
+                [InlineKeyboardButton(text="[InlineKeyboardButton(text="Upload Cards", callback_data="admin_upload")],
                 [InlineKeyboardButton(text="🔙 Back", callback_data="menu_home")],
             ])
         )
