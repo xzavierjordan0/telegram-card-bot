@@ -841,7 +841,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if len(error_msg) > 3900:
                 error_msg = error_msg[:3900] + "...\n[Truncated]"
                 await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
-                    context.user_data['uploading'] = False
+                context.user_data['uploading'] = False
     else:
         await update.message.reply_text("❌ Unsupported file format. Use .txt or .csv")
 
