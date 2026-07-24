@@ -15,6 +15,10 @@ from database.models import User, Card, Order, Base
 from config.settings import BOT_TOKEN, USDT_ADDRESS, ADMIN_IDS, DATABASE_URL
 from datetime import datetime
 
+# Default prices
+DEFAULT_NAKED_PRICE = 0.33
+DEFAULT_CLOTHED_PRICE = 25.0
+
 print("🔄 Starting bot initialization...")
 
 logging.basicConfig(
@@ -22,7 +26,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Set startup timeout
 def timeout_handler(signum, frame):
     print("❌ Startup timeout!")
     sys.exit(1)
@@ -30,7 +33,6 @@ def timeout_handler(signum, frame):
 signal.signal(signal.SIGALRM, timeout_handler)
 signal.alarm(45)
 
-# Database
 print("🔄 Connecting to database...")
 engine = create_engine(
     DATABASE_URL, 
@@ -155,8 +157,8 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_available = clothed_cards + naked_cards
         clothed_card = session.query(Card).filter(Card.bin == bin_number, Card.billing == True).first()
         naked_card = session.query(Card).filter(Card.bin == bin_number, Card.billing == False).first()
-        clothed_price = clothed_card.price if clothed_card else first_card.price
-        naked_price = naked_card.price if naked_card else first_card.price
+        clothed_price = clothed_card.price if clothed_card else DEFAULT_CLOTHED_PRICE
+        naked_price = naked_card.price if naked_card else DEFAULT_NAKED_PRICE
         response_text = f"🎴 **BIN: {bin_number}**\n\n"
         response_text += f"📦 **Clothed:** {clothed_cards} @ ${clothed_price} USDT\n"
         response_text += f"📦 **Naked:** {naked_cards} @ ${naked_price} USDT\n\n"
@@ -180,8 +182,8 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         naked_cards = session.query(Card).filter(Card.bin == bin_number, Card.billing == False, Card.is_sold == False).count()
         clothed_card = session.query(Card).filter(Card.bin == bin_number, Card.billing == True).first()
         naked_card = session.query(Card).filter(Card.bin == bin_number, Card.billing == False).first()
-        clothed_price = clothed_card.price if clothed_card else 25.0
-        naked_price = naked_card.price if naked_card else 25.0
+        clothed_price = clothed_card.price if clothed_card else DEFAULT_CLOTHED_PRICE
+        naked_price = naked_card.price if naked_card else DEFAULT_NAKED_PRICE
         order_text = f"🛒 **Order BIN {bin_number}**\n\n"
         order_text += f"📦 **Clothed:** {clothed_cards} available @ ${clothed_price}\n"
         order_text += f"📦 **Naked:** {naked_cards} available @ ${naked_price}\n\n"
@@ -224,8 +226,8 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         naked_available = session.query(Card).filter(Card.bin == selected_bin, Card.billing == False, Card.is_sold == False).count()
         clothed_card = session.query(Card).filter(Card.bin == selected_bin, Card.billing == True).first()
         naked_card = session.query(Card).filter(Card.bin == selected_bin, Card.billing == False).first()
-        clothed_price = clothed_card.price if clothed_card else 25.0
-        naked_price = naked_card.price if naked_card else 25.0
+        clothed_price = clothed_card.price if clothed_card else DEFAULT_CLOTHED_PRICE
+        naked_price = naked_card.price if naked_card else DEFAULT_NAKED_PRICE
         total_cost = (clothed_qty * clothed_price) + (naked_qty * naked_price)
         if user.balance < total_cost:
             await update.message.reply_text(f"❌ **Insufficient Balance!**\n\n💰 Your Balance: `{user.balance} USDT`\n💰 Required: `{total_cost:.2f} USDT`\n\nUse `/topup` to add funds.", parse_mode="Markdown")
@@ -287,7 +289,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📋 **Available Commands:**\n\n/start - Welcome message\n/balance - Check USDT balance\n/topup - Get deposit address\n/catalog - Browse cards by country\n/bin - BIN lookup\n/history - View purchase history\n/help - Show this message\n\n*Admin Commands:*\n/stats - View store statistics\n/upload - Bulk upload cards\n/edit_price - Edit BIN prices\n/export - Export all cards to file", parse_mode="Markdown")
+    await update.message.reply_text("📋 **Available Commands:**\n\n/start - Welcome message\n/balance - Check USDT balance\n/topup - Get deposit address\n/catalog - Browse cards by country\n/bin - BIN lookup\n/history - View purchase history\n/help - Show this message\n\n*Admin Commands:*\n/stats - View store statistics\n/upload - Bulk upload cards\n/edit_price - Edit BIN prices\n/add_price - Set default upload price\n/export - Export all cards to file", parse_mode="Markdown")
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update.effective_user.id)
@@ -309,7 +311,7 @@ async def admin_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user.is_admin:
         await update.message.reply_text("🔒 Admin command only!")
         return
-    await update.message.reply_text("📝 **Edit BIN Prices**\n\nUsage: /edit_price BIN PRICE\n\nExample: /edit_price 414720 25\n\nThis will update ALL cards with BIN 414720 to $25 USDT")
+    await update.message.reply_text("📝 **Edit BIN Price**\n\nUsage: /edit_price BIN PRICE\n\nExample: /edit_price 414720 25\n\nThis will update ALL cards with BIN 414720 to $25 USDT")
 
 async def handle_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update.effective_user.id)
@@ -334,7 +336,37 @@ async def handle_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         session.query(Card).filter(Card.bin == bin_number).update({'price': price})
         session.commit()
-        await update.message.reply_text(f"✅ **Prices Updated!**\n\n🎴 BIN: {bin_number}\n💰 Price: ${price} USDT\n📊 Cards Updated: {count}", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ **BIN Price Updated!**\n\n🎴 BIN: {bin_number}\n💰 New Price: ${price} USDT\n📊 Cards Updated: {count}", parse_mode="Markdown")
+    finally:
+        session.close()
+
+async def admin_add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    await update.message.reply_text("📝 **Set Default Upload Price**\n\nUsage: /add_price PRICE\n\nExample: /add_price 0.50\n\nThis sets the default price for ALL new uploaded cards to $0.50 USDT\n\n*Default is $0.33 for naked cards*")
+
+async def handle_add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    session = SessionLocal()
+    try:
+        parts = update.message.text.split(' ')
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Invalid format.\n\nUsage: /add_price PRICE")
+            return
+        try:
+            price = float(parts[1].strip())
+        except ValueError:
+            await update.message.reply_text("❌ Price must be a number.")
+            return
+        count = session.query(Card).filter(Card.is_sold == False).count()
+        session.query(Card).filter(Card.is_sold == False).update({'price': price})
+        session.commit()
+        await update.message.reply_text(f"✅ **Default Price Set!**\n\n💰 New Price: ${price} USDT\n📊 Cards Updated: {count}\n\n*All naked cards now ready for sale!*", parse_mode="Markdown")
     finally:
         session.close()
 
@@ -344,7 +376,21 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 Admin command only!")
         return
     context.user_data['uploading'] = True
-    await update.message.reply_text("📦 **Bulk Upload Cards**\n\n📁 Send a card file (.txt, .csv, .dat)\n\n**Accepted Formats:**\n- cc|mm|yy|cvv\n- cc,mm,yy,cvv\n- cc mm yy cvv\n- Any format with 4+ fields\n\n✅ Auto-detects format\n✅ Default price: $25 USDT\n✅ Default country: US\n✅ All cards marked as Naked (no billing)\n\n⏳ Waiting for file...", parse_mode="Markdown")
+    await update.message.reply_text(
+        "📦 **Bulk Upload Cards**\n\n"
+        "📁 Send a card file (.txt, .csv, .dat)\n\n"
+        "**Accepted Formats:**\n"
+        "- cc|mm|yy|cvv\n"
+        "- cc,mm,yy,cvv\n"
+        "- cc mm yy cvv\n"
+        "- Any format with 4+ fields\n\n"
+        "✅ Auto-detects format\n"
+        f"✅ Default Price: ${DEFAULT_NAKED_PRICE} USDT\n"
+        "✅ Default Country: US\n"
+        "✅ All cards marked as Naked (no billing)\n"
+        "\n⏳ Waiting for file...",
+        parse_mode="Markdown"
+    )
 
 async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await get_or_create_user(update.effective_user.id)
@@ -387,7 +433,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await file.download_to_drive(file_path)
             print(f"✅ File downloaded to: {file_path}")
             
-            # Check if file exists and get size
             if not os.path.exists(file_path):
                 await update.message.reply_text(f"❌ File not found at: {file_path}")
                 context.user_data['uploading'] = False
@@ -409,39 +454,32 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if not line or line.startswith('#'):
                             continue
                         
-                        # Auto-detect delimiter
                         delimiters = [',', '|', '\t', ' ']
                         delimiter = max(delimiters, key=lambda d: line.count(d))
                         parts = [p.strip() for p in line.split(delimiter)]
                         
                         print(f"📝 Line {line_num}: {len(parts)} parts, delimiter: '{delimiter}'")
                         
-                        # Parse cards - accept flexible formats
-                        card = None
                         if len(parts) >= 4:
                             try:
-                                # Format: cc|mm|yy|cvv or cc,mm,yy,cvv
                                 card_number = parts[0]
                                 expiry_month = parts[1]
                                 expiry_year = parts[2]
                                 cvv = parts[3]
                                 
-                                # Validate card number (13-19 digits)
                                 if not card_number.isdigit() or len(card_number) < 13 or len(card_number) > 19:
                                     failed_count += 1
                                     print(f"⚠️ Line {line_num}: Invalid card number")
                                     continue
                                 
-                                # Format expiry as MM/YY
                                 expiry = f"{expiry_month}/{expiry_year}"
-                                
-                                # BIN from first 6 digits
                                 bin_number = card_number[:6]
                                 
                                 # Default values
                                 country = parts[4] if len(parts) > 4 and len(parts[4]) == 2 else 'US'
-                                billing = parts[5] in ['1', 'True', 'yes', 'true'] if len(parts) > 5 else False  # Default naked
-                                price = float(parts[6]) if len(parts) > 6 and parts[6].replace('.', '').isdigit() else 25.0
+                                billing = parts[5] in ['1', 'True', 'yes', 'true'] if len(parts) > 5 else False
+                                # Default price is $0.33 for naked cards
+                                price = float(parts[6]) if len(parts) > 6 and parts[6].replace('.', '').isdigit() else DEFAULT_NAKED_PRICE
                                 
                                 card = Card(
                                     bin=bin_number,
@@ -478,6 +516,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"❌ Failed Lines: {failed_count}\n"
                     f"📈 Total Cards: {total}\n"
                     f"📉 Available: {available}\n\n"
+                    f"💰 Default Price: ${DEFAULT_NAKED_PRICE} USDT\n"
                     f"📁 File: `{filename}`\n"
                     f"📊 File Size: {file_size} bytes",
                     parse_mode="Markdown"
@@ -527,6 +566,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Regex('^/bin '), handle_bin_search))
     application.add_handler(MessageHandler(filters.Regex('^/edit_price '), handle_edit_price))
+    application.add_handler(MessageHandler(filters.Regex('^/add_price '), handle_add_price))
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
     application.add_handler(CallbackQueryHandler(order_bin_callback, pattern="^order_bin_"))
@@ -535,6 +575,7 @@ def main():
     application.add_handler(CommandHandler("stats", admin_stats))
     application.add_handler(CommandHandler("upload", admin_upload))
     application.add_handler(CommandHandler("edit_price", admin_edit_price))
+    application.add_handler(CommandHandler("add_price", admin_add_price))
     application.add_handler(CommandHandler("export", admin_export))
     application.add_error_handler(error_handler)
     print("✅ Bot is running...")
@@ -544,8 +585,3 @@ if __name__ == "__main__":
     try:
         main()
         print("✅ Bot started successfully!")
-    except Exception as e:
-        import traceback
-        print(f"❌ Bot crashed: {e}")
-        traceback.print_exc()
-        sys.exit(1)
