@@ -18,7 +18,17 @@ logging.basicConfig(
 )
 
 # Database
-engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, pool_recycle=3600)
+engine = create_engine(
+    DATABASE_URL, 
+    echo=False, 
+    pool_pre_ping=True, 
+    pool_recycle=3600,
+    connect_args={
+        'sslmode': 'require',
+        'connect_timeout': 10
+    }
+)
+
 Base.metadata.create_all(bind=engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
