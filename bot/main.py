@@ -423,12 +423,11 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt_content += f"📦 NAKED ({len(naked_cards_to_sell)} cards)\n"
         txt_content += f"{'-'*50}\n"
         
+       
         for card in naked_cards_to_sell:
             card.is_sold = True
             card.order_id = order.id
-     
-        # Build .TXT file content (continued)
-        txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
+            txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
         
         txt_content += f"\n\n{'='*50}\n"
         txt_content += f"✅ All cards verified and ready!\n"
@@ -841,11 +840,12 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
             error_msg = traceback.format_exc()
             if len(error_msg) > 3900:
                 error_msg = error_msg[:3900] + "...\n[Truncated]"
-            await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
+                        await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
             context.user_data['uploading'] = False
     else:
         await update.message.reply_text("❌ Unsupported file format. Use .txt or .csv")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors gracefully"""
     logging.error(f"Exception while handling an update: {context.error}")
     if update and update.effective_message:
