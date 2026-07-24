@@ -2,13 +2,12 @@ import sys
 import io
 import os
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database.models import User, Card, Order, Base
 from config.settings import BOT_TOKEN, USDT_ADDRESS, ADMIN_IDS, DATABASE_URL
@@ -31,45 +30,8 @@ engine = create_engine(
     }
 )
 
-# Test database connection before starting
-try:
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    print("✅ Database connected successfully!")
-except Exception as e:
-    print(f"❌ Database connection failed: {e}")
-    sys.exit(1)
-
 Base.metadata.create_all(bind=engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# BIN metadata database
-def get_bin_metadata(bin_number: str) -> dict:
-    """Get BIN metadata"""
-    bin_db = {
-        "402020": {
-            "Bank": "STATE EMPLOYEES CREDIT UNION OF MARYLAND, INC.",
-            "Brand": "VISA",
-            "Country": "US",
-            "Card Type": "debit",
-            "Level": "CLASSIC"
-        },
-        "414720": {
-            "Bank": "CHASE BANK",
-            "Brand": "VISA",
-            "Country": "US",
-            "Card Type": "debit",
-            "Level": "CLASSIC"
-        },
-        "524012": {
-            "Bank": "BANK OF AMERICA",
-            "Brand": "MASTERCARD",
-            "Country": "US",
-            "Card Type": "credit",
-            "Level": "STANDARD"
-        }
-    }
-    return bin_db.get(bin_number, {})
 
 async def get_or_create_user(telegram_id: int):
     session = SessionLocal()
@@ -97,7 +59,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check your balance\n"
         "/topup - Get USDT deposit address\n"
         "/catalog - Browse cards\n"
-        "/bin - BIN lookup\n"
         "/history - View purchases\n"
         "/help - Show all commands",
         parse_mode="Markdown"
@@ -154,6 +115,7 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search cards by BIN and show stock by subcategory"""
     session = SessionLocal()
     try:
+        # Extract BIN from command
         command_parts = update.message.text.split(' ')
         if len(command_parts) < 2:
             await update.message.reply_text("❌ Please provide a BIN number.\n\nExample: `/bin 414720`")
@@ -161,16 +123,21 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         bin_number = command_parts[1].strip()
         
+        # Validate BIN (should be 6 digits)
         if not bin_number.isdigit() or len(bin_number) != 6:
             await update.message.reply_text("❌ BIN must be exactly 6 digits.\n\nExample: `/bin 414720`")
             return
         
-        first_card = session.query(Card).filter(Card.bin == bin_number).first()
+        # Get first card to fetch BIN details
+        first_card = session.query(Card).filter(
+            Card.bin == bin_number
+        ).first()
         
         if not first_card:
             await update.message.reply_text(f"📭 No cards found for BIN `{bin_number}`")
             return
         
+        # Count stock by billing status
         clothed_cards = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True,
@@ -185,6 +152,7 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         total_available = clothed_cards + naked_cards
         
+        # Get prices (can be different for clothed vs naked)
         clothed_card = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True
@@ -197,15 +165,19 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clothed_price = clothed_card.price if clothed_card else first_card.price
         naked_price = naked_card.price if naked_card else first_card.price
         
+        # Get BIN metadata
         bin_metadata = get_bin_metadata(bin_number)
         
+        # Build response
         response_text = f"🎴 **BIN: {bin_number}**\n\n"
         
+        # Add BIN metadata
         if bin_metadata:
             for key, value in bin_metadata.items():
                 response_text += f"{key}: `{value}`\n"
             response_text += "\n"
         
+        # Add stock counts with new terms
         response_text += f"📦 **Clothed:** {clothed_cards} @ ${clothed_price} USDT\n"
         response_text += f"📦 **Naked:** {naked_cards} @ ${naked_price} USDT\n\n"
         response_text += f"📊 **Total Available:** {total_available}\n\n"
@@ -214,6 +186,7 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(response_text, parse_mode="Markdown")
             return
         
+        # Add order button
         keyboard = [[InlineKeyboardButton(text="🛒 Order Now", callback_data=f"order_bin_{bin_number}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -227,10 +200,12 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     bin_number = query.data.split("_")[2]
     
+    # Store BIN in user data
     context.user_data['selected_bin'] = bin_number
     
     session = SessionLocal()
     try:
+        # Get stock counts again
         clothed_cards = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True,
@@ -243,6 +218,7 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             Card.is_sold == False
         ).count()
         
+        # Get prices
         clothed_card = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True
@@ -255,6 +231,7 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         clothed_price = clothed_card.price if clothed_card else 25.0
         naked_price = naked_card.price if naked_card else 25.0
         
+        # Build order form
         order_text = f"🛒 **Order BIN {bin_number}**\n\n"
         order_text += f"📦 **Clothed:** {clothed_cards} available @ ${clothed_price}\n"
         order_text += f"📦 **Naked:** {naked_cards} available @ ${naked_price}\n\n"
@@ -280,6 +257,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session = SessionLocal()
     try:
+        # Parse quantities
         quantities = update.message.text.split(' ')
         if len(quantities) < 2:
             await update.message.reply_text("❌ Please enter quantities.\n\nExample: `5,3`")
@@ -287,6 +265,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         qty_input = quantities[1].strip()
         
+        # Parse clothed and naked quantities
         if ',' in qty_input:
             parts = qty_input.split(',')
             clothed_qty = int(parts[0].strip())
@@ -295,6 +274,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clothed_qty = int(qty_input)
             naked_qty = 0
         
+        # Validate quantities
         if clothed_qty < 0 or naked_qty < 0:
             await update.message.reply_text("❌ Quantities cannot be negative.")
             return
@@ -303,6 +283,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Please order at least 1 card.")
             return
         
+        # Check stock availability
         clothed_available = session.query(Card).filter(
             Card.bin == selected_bin,
             Card.billing == True,
@@ -315,6 +296,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             Card.is_sold == False
         ).count()
         
+        # Get prices
         clothed_card = session.query(Card).filter(
             Card.bin == selected_bin,
             Card.billing == True
@@ -327,8 +309,10 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clothed_price = clothed_card.price if clothed_card else 25.0
         naked_price = naked_card.price if naked_card else 25.0
         
+        # Calculate total (BIN-specific pricing)
         total_cost = (clothed_qty * clothed_price) + (naked_qty * naked_price)
         
+        # Check user balance
         if user.balance < total_cost:
             await update.message.reply_text(
                 f"❌ **Insufficient Balance!**\n\n"
@@ -339,6 +323,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Check if enough stock
         if clothed_qty > clothed_available:
             await update.message.reply_text(
                 f"❌ **Not enough Clothed cards!**\n\n"
@@ -355,6 +340,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Create order
         order = Order(
             user_id=user.id,
             amount=total_cost,
@@ -363,8 +349,10 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         session.add(order)
         
+        # Deduct balance
         user.balance -= total_cost
         
+        # Get cards to sell
         clothed_cards_to_sell = session.query(Card).filter(
             Card.bin == selected_bin,
             Card.billing == True,
@@ -407,7 +395,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         session.commit()
         
-                # Create .TXT file and send to user
+        # Create .TXT file and send to user
         file_bytes = io.BytesIO(txt_content.encode('utf-8'))
         file_bytes.name = f"order_{order.id}_{selected_bin}.txt"
         
@@ -487,7 +475,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check USDT balance\n"
         "/topup - Get deposit address\n"
         "/catalog - Browse cards by country\n"
-        "/bin - BIN lookup\n"
         "/history - View purchase history\n"
         "/help - Show this message\n\n"
         "*Admin Commands:*\n"
@@ -498,6 +485,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/upload - Bulk upload cards",
         parse_mode="Markdown"
     )
+
+
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View store statistics"""
@@ -608,10 +597,11 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Process uploaded card file"""
     user = await get_or_create_user(update.effective_user.id)
     if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
         return
     
     if not context.user_data.get('uploading'):
-        return
+        return  # Don't process file if not waiting for upload
     
     document = update.message.document
     filename = document.file_name
@@ -620,7 +610,10 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⏳ Downloading file...")
         
         try:
-            # Download file (use forward slash for Linux/Render)
+            # Create uploads directory BEFORE downloading file
+            os.makedirs("uploads", exist_ok=True)
+            
+            # Download file
             file_path = f"uploads/{filename}"
             file = await context.bot.get_file(document.file_id)
             await file.download_to_drive(file_path)
@@ -656,7 +649,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                 )
                                 cards.append(card)
                                 success_count += 1
-                            except:
+                            except ValueError:
                                 continue
                 
                 session.bulk_insert_mappings(Card, [c.__dict__ for c in cards])
@@ -676,11 +669,19 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 context.user_data['uploading'] = False
             
+            except Exception as e:
+                import traceback
+                error_msg = traceback.format_exc()
+                await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
+                context.user_data['uploading'] = False
+                session.rollback()
             finally:
                 session.close()
         
         except Exception as e:
-            await update.message.reply_text(f"❌ Upload error: {e}")
+            import traceback
+            error_msg = traceback.format_exc()
+            await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
             context.user_data['uploading'] = False
     else:
         await update.message.reply_text("❌ Unsupported file format. Use .txt or .csv")
@@ -704,20 +705,10 @@ def main():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("topup", topup))
     application.add_handler(CommandHandler("catalog", catalog))
-    application.add_handler(CommandHandler("bin", bin_lookup))
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("help", help_command))
-    
-    # BIN search handler
-    application.add_handler(MessageHandler(filters.Regex('^/bin '), handle_bin_search))
-    
-    # Callback handlers
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
-    application.add_handler(CallbackQueryHandler(order_bin_callback, pattern="^order_bin_"))
-    
-    # BIN order handler (must be after command handlers)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bin_order))
     
     # Admin handlers
     application.add_handler(CommandHandler("stats", admin_stats))
