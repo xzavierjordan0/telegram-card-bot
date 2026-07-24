@@ -457,12 +457,12 @@ async def admin_countries(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-def main():
+async def main():
     print("✅ Starting bot...")
     
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Regular user handlers
+    # Add all handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("topup", topup))
@@ -472,28 +472,15 @@ def main():
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
     
-    # Admin handlers
-    application.add_handler(CommandHandler("add_card", admin_add_card))
-    application.add_handler(CommandHandler("upload", admin_upload))
-    application.add_handler(CommandHandler("stats", admin_stats))
-    application.add_handler(CommandHandler("countries", admin_countries))
-    
-    # File upload handler (must be after command handlers)
-    application.add_handler(MessageHandler(
-        filters.Document.ALL, 
-        handle_file_upload
-    ))
-    
-    # Error handler
+    # Add error handler
     application.add_error_handler(error_handler)
     
     print("✅ Bot is running...")
     
-    try:
-        from telegram import Update as TelegramUpdate
-        application.run_polling(allowed_updates=TelegramUpdate.ALL_TYPES)
-    except:
-        application.run_polling()
+    # Start polling (async compatible)
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
+
