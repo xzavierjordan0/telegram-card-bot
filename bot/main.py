@@ -416,6 +416,44 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
+async def admin_all_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """View all cards in database (admin only)"""
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    
+    session = SessionLocal()
+    try:
+        cards = session.query(Card).order_by(Card.created_at.desc()).limit(50).all()
+        
+        if not cards:
+            await update.message.reply_text("📭 No cards found.")
+            return
+        
+        cards_text = "🎴 **All Cards** (Latest 50)\n\n"
+        
+        for card in cards:
+            # Truncate card number to save space
+            cards_text += (
+                f"🆔 `{card.id}` | BIN: {card.bin}\n"
+                f"💳 ****{card.number[-4:]}\n"
+                f"🏷️ ${card.price} | {'🟢' if card.billing else '🔴'}\n"
+                f"🏳️ {card.country} | {'✅ Sold' if card.is_sold else '⚪ Avail'}\n\n"
+            )
+        
+        # Split message if too long
+        if len(cards_text) > 4000:
+            mid = len(cards_text) // 2
+            await update.message.reply_text(cards_text[:mid], parse_mode="Markdown")
+            await update.message.reply_text(cards_text[mid:], parse_mode="Markdown")
+        else:
+            await update.message.reply_text(cards_text, parse_mode="Markdown")
+    
+    finally:
+        session.close()
+
+
 async def country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     country_code = query.data.split("_")[1]
@@ -555,14 +593,21 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users_text += (
                 f"🆔 `{u.telegram_id}`\n"
                 f"👤 @{u.username or 'N/A'}\n"
-                f"💰 ${u.balance} USDT\n"
-                f"📅 Joined: {u.created_at.strftime('%Y-%m-%d')}\n\n"
+                f"💰 ${u.balance} USDT\n\n"
             )
         
-        await update.message.reply_text(users_text, parse_mode="Markdown")
+        # Check message length and split if needed
+        if len(users_text) > 4000:
+            # Send first half
+            mid = len(users_text) // 2
+            await update.message.reply_text(users_text[:mid], parse_mode="Markdown")
+            await update.message.reply_text(users_text[mid:], parse_mode="Markdown")
+        else:
+            await update.message.reply_text(users_text, parse_mode="Markdown")
+    
     finally:
         session.close()
-
+        
 async def admin_add_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add single card via command"""
     user = await get_or_create_user(update.effective_user.id)
@@ -660,31 +705,26 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 available = session.query(Card).filter(Card.is_sold == False).count()
                 
                 await update.message.reply_text(
-                    f"✅ **Upload Complete!**\n\n"
-                    f"📊 Cards Uploaded: {success_count}\n"
-                    f"📈 Total Cards: {total}\n"
-                    f"📉 Available for Sale: {available}\n\n"
-                    f"🔄 Cards auto-sorted by country/BIN",
-                    parse_mode="Markdown"
+                     f"✅ **Upload Complete!**\n\n"
+                     f"📊 Cards Uploaded: {success_count}\n"
+                     f"📈 Total Cards: {total}\n"
+                     f"📉 Available: {available}",
+                     parse_mode="Markdown")               
                 )
+                
                 context.user_data['uploading'] = False
             
             except Exception as e:
                 import traceback
                 error_msg = traceback.format_exc()
-                await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
-                context.user_data['uploading'] = False
-                session.rollback()
-            finally:
-                session.close()
-        
-        except Exception as e:
-            import traceback
-            error_msg = traceback.format_exc()
-            await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
-            context.user_data['uploading'] = False
-    else:
-        await update.message.reply_text("❌ Unsupported file format. Use .txt or .csv")
+    
+            # Truncate error message if too long
+            if len(error_msg) > 4000:
+                error_msg = error_msg[:3900] + "...\n[Error message truncated]"
+    
+            await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
+                    context.user_data['uploading'] = False
+                        session.rollback()
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors gracefully"""
