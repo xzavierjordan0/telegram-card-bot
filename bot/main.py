@@ -457,7 +457,7 @@ async def admin_countries(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-async def main():
+def main():
     print("✅ Starting bot...")
     
     application = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -471,16 +471,16 @@ async def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
+    application.add_handler(CommandHandler("users", admin_users))
     
     # Add error handler
     application.add_error_handler(error_handler)
     
     print("✅ Bot is running...")
     
-    # Start polling (async compatible)
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Start polling (simplified for Python 3.14)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
 
