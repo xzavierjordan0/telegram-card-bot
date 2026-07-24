@@ -426,7 +426,7 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for card in naked_cards_to_sell:
             card.is_sold = True
             card.order_id = order.id
-            txt_content += f"{card.number}|{card.expiry}|
+     
         # Build .TXT file content (continued)
         txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
         
