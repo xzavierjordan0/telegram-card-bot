@@ -1,12 +1,14 @@
 import sys
-import sys
+import io
+import os
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from database.models import User, Card, Order, Base
 from config.settings import BOT_TOKEN, USDT_ADDRESS, ADMIN_IDS, DATABASE_URL
@@ -29,8 +31,45 @@ engine = create_engine(
     }
 )
 
+# Test database connection before starting
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    print("✅ Database connected successfully!")
+except Exception as e:
+    print(f"❌ Database connection failed: {e}")
+    sys.exit(1)
+
 Base.metadata.create_all(bind=engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# BIN metadata database
+def get_bin_metadata(bin_number: str) -> dict:
+    """Get BIN metadata"""
+    bin_db = {
+        "402020": {
+            "Bank": "STATE EMPLOYEES CREDIT UNION OF MARYLAND, INC.",
+            "Brand": "VISA",
+            "Country": "US",
+            "Card Type": "debit",
+            "Level": "CLASSIC"
+        },
+        "414720": {
+            "Bank": "CHASE BANK",
+            "Brand": "VISA",
+            "Country": "US",
+            "Card Type": "debit",
+            "Level": "CLASSIC"
+        },
+        "524012": {
+            "Bank": "BANK OF AMERICA",
+            "Brand": "MASTERCARD",
+            "Country": "US",
+            "Card Type": "credit",
+            "Level": "STANDARD"
+        }
+    }
+    return bin_db.get(bin_number, {})
 
 async def get_or_create_user(telegram_id: int):
     session = SessionLocal()
@@ -58,6 +97,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check your balance\n"
         "/topup - Get USDT deposit address\n"
         "/catalog - Browse cards\n"
+        "/bin - BIN lookup\n"
         "/history - View purchases\n"
         "/help - Show all commands",
         parse_mode="Markdown"
@@ -100,6 +140,293 @@ async def catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("🎴 **Select Country:**", reply_markup=reply_markup)
+
+async def bin_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show BIN lookup instructions"""
+    await update.message.reply_text(
+        "🔍 **BIN Lookup**\n\n"
+        "Enter a BIN to search (first 6 digits):\n\n"
+        "Example: `/bin 414720`",
+        parse_mode="Markdown"
+    )
+
+async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search cards by BIN and show stock by subcategory"""
+    session = SessionLocal()
+    try:
+        command_parts = update.message.text.split(' ')
+        if len(command_parts) < 2:
+            await update.message.reply_text("❌ Please provide a BIN number.\n\nExample: `/bin 414720`")
+            return
+        
+        bin_number = command_parts[1].strip()
+        
+        if not bin_number.isdigit() or len(bin_number) != 6:
+            await update.message.reply_text("❌ BIN must be exactly 6 digits.\n\nExample: `/bin 414720`")
+            return
+        
+        first_card = session.query(Card).filter(Card.bin == bin_number).first()
+        
+        if not first_card:
+            await update.message.reply_text(f"📭 No cards found for BIN `{bin_number}`")
+            return
+        
+        clothed_cards = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == True,
+            Card.is_sold == False
+        ).count()
+        
+        naked_cards = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == False,
+            Card.is_sold == False
+        ).count()
+        
+        total_available = clothed_cards + naked_cards
+        
+        clothed_card = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == True
+        ).first()
+        naked_card = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == False
+        ).first()
+        
+        clothed_price = clothed_card.price if clothed_card else first_card.price
+        naked_price = naked_card.price if naked_card else first_card.price
+        
+        bin_metadata = get_bin_metadata(bin_number)
+        
+        response_text = f"🎴 **BIN: {bin_number}**\n\n"
+        
+        if bin_metadata:
+            for key, value in bin_metadata.items():
+                response_text += f"{key}: `{value}`\n"
+            response_text += "\n"
+        
+        response_text += f"📦 **Clothed:** {clothed_cards} @ ${clothed_price} USDT\n"
+        response_text += f"📦 **Naked:** {naked_cards} @ ${naked_price} USDT\n\n"
+        response_text += f"📊 **Total Available:** {total_available}\n\n"
+        
+        if total_available == 0:
+            await update.message.reply_text(response_text, parse_mode="Markdown")
+            return
+        
+        keyboard = [[InlineKeyboardButton(text="🛒 Order Now", callback_data=f"order_bin_{bin_number}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(response_text, reply_markup=reply_markup, parse_mode="Markdown")
+    
+    finally:
+        session.close()
+
+async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle BIN order form"""
+    query = update.callback_query
+    bin_number = query.data.split("_")[2]
+    
+    context.user_data['selected_bin'] = bin_number
+    
+    session = SessionLocal()
+    try:
+        clothed_cards = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == True,
+            Card.is_sold == False
+        ).count()
+        
+        naked_cards = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == False,
+            Card.is_sold == False
+        ).count()
+        
+        clothed_card = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == True
+        ).first()
+        naked_card = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == False
+        ).first()
+        
+        clothed_price = clothed_card.price if clothed_card else 25.0
+        naked_price = naked_card.price if naked_card else 25.0
+        
+        order_text = f"🛒 **Order BIN {bin_number}**\n\n"
+        order_text += f"📦 **Clothed:** {clothed_cards} available @ ${clothed_price}\n"
+        order_text += f"📦 **Naked:** {naked_cards} available @ ${naked_price}\n\n"
+        order_text += f"*Enter quantities (separated by comma):*\n"
+        order_text += f"Example: `5,3` (5 Clothed, 3 Naked)\n"
+        order_text += f"\n*Or just one number for Clothed only:*\n"
+        order_text += f"Example: `10` (10 Clothed)"
+        
+        await query.edit_message_text(order_text, parse_mode="Markdown")
+        await query.answer("Enter quantities: `clothed,naked` or just `clothed`")
+    
+    finally:
+        session.close()
+
+async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process BIN order with quantities and deliver .TXT file"""
+    user = await get_or_create_user(update.effective_user.id)
+    selected_bin = context.user_data.get('selected_bin')
+    
+    if not selected_bin:
+        await update.message.reply_text("❌ No BIN selected. Use `/bin` first.")
+        return
+    
+    session = SessionLocal()
+    try:
+        quantities = update.message.text.split(' ')
+        if len(quantities) < 2:
+            await update.message.reply_text("❌ Please enter quantities.\n\nExample: `5,3`")
+            return
+        
+        qty_input = quantities[1].strip()
+        
+        if ',' in qty_input:
+            parts = qty_input.split(',')
+            clothed_qty = int(parts[0].strip())
+            naked_qty = int(parts[1].strip())
+        else:
+            clothed_qty = int(qty_input)
+            naked_qty = 0
+        
+        if clothed_qty < 0 or naked_qty < 0:
+            await update.message.reply_text("❌ Quantities cannot be negative.")
+            return
+        
+        if clothed_qty == 0 and naked_qty == 0:
+            await update.message.reply_text("❌ Please order at least 1 card.")
+            return
+        
+        clothed_available = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == True,
+            Card.is_sold == False
+        ).count()
+        
+        naked_available = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == False,
+            Card.is_sold == False
+        ).count()
+        
+        clothed_card = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == True
+        ).first()
+        naked_card = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == False
+        ).first()
+        
+        clothed_price = clothed_card.price if clothed_card else 25.0
+        naked_price = naked_card.price if naked_card else 25.0
+        
+        total_cost = (clothed_qty * clothed_price) + (naked_qty * naked_price)
+        
+        if user.balance < total_cost:
+            await update.message.reply_text(
+                f"❌ **Insufficient Balance!**\n\n"
+                f"💰 Your Balance: `{user.balance} USDT`\n"
+                f"💰 Required: `{total_cost:.2f} USDT`\n\n"
+                f"Use `/topup` to add funds.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        if clothed_qty > clothed_available:
+            await update.message.reply_text(
+                f"❌ **Not enough Clothed cards!**\n\n"
+                f"📊 Available: {clothed_available}\n"
+                f"📊 You requested: {clothed_qty}"
+            )
+            return
+        
+        if naked_qty > naked_available:
+            await update.message.reply_text(
+                f"❌ **Not enough Naked cards!**\n\n"
+                f"📊 Available: {naked_available}\n"
+                f"📊 You requested: {naked_qty}"
+            )
+            return
+        
+        order = Order(
+            user_id=user.id,
+            amount=total_cost,
+            status="completed",
+            details=f"BIN {selected_bin} - {clothed_qty} Clothed, {naked_qty} Naked"
+        )
+        session.add(order)
+        
+        user.balance -= total_cost
+        
+        clothed_cards_to_sell = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == True,
+            Card.is_sold == False
+        ).limit(clothed_qty).all()
+        
+        naked_cards_to_sell = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == False,
+            Card.is_sold == False
+        ).limit(naked_qty).all()
+        
+        # Build .TXT file content
+        txt_content = f"🎴 CARD DELIVERY - Order #{order.id}\n"
+        txt_content += f"📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        txt_content += f"🆔 User: {user.telegram_id}\n"
+        txt_content += f"🎴 BIN: {selected_bin}\n"
+        txt_content += f"📊 Total Cards: {len(clothed_cards_to_sell) + len(naked_cards_to_sell)}\n"
+        txt_content += f"💰 Total Cost: ${total_cost:.2f} USDT\n\n"
+        txt_content += f"{'='*50}\n\n"
+        txt_content += f"📦 CLOTHED ({len(clothed_cards_to_sell)} cards)\n"
+        txt_content += f"{'-'*50}\n"
+        
+        for card in clothed_cards_to_sell:
+            card.is_sold = True
+            card.order_id = order.id
+            txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
+        
+        txt_content += f"\n{'='*50}\n\n"
+        txt_content += f"📦 NAKED ({len(naked_cards_to_sell)} cards)\n"
+        txt_content += f"{'-'*50}\n"
+        
+        for card in naked_cards_to_sell:
+            card.is_sold = True
+            card.order_id = order.id
+            txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
+        
+        txt_content += f"\n\n{'='*50}\n"
+        txt_content += f"✅ All cards verified and ready!\n"
+        
+        session.commit()
+        
+                # Create .TXT file and send to user
+        file_bytes = io.BytesIO(txt_content.encode('utf-8'))
+        file_bytes.name = f"order_{order.id}_{selected_bin}.txt"
+        
+        await update.message.reply_document(
+            document=file_bytes,
+            caption=f"✅ **Order #{order.id} Complete!**\n\n"
+                   f"🎴 BIN: {selected_bin}\n"
+                   f"📦 Clothed: {len(clothed_cards_to_sell)} cards\n"
+                   f"📦 Naked: {len(naked_cards_to_sell)} cards\n"
+                   f"💰 Total: ${total_cost:.2f} USDT\n"
+                   f"💰 New Balance: `{user.balance} USDT`",
+            parse_mode="Markdown"
+        )
+        
+        # Clear user data
+        context.user_data.pop('selected_bin', None)
+    
+    finally:
+        session.close()
 
 async def country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -160,6 +487,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check USDT balance\n"
         "/topup - Get deposit address\n"
         "/catalog - Browse cards by country\n"
+        "/bin - BIN lookup\n"
         "/history - View purchase history\n"
         "/help - Show this message\n\n"
         "*Admin Commands:*\n"
@@ -292,12 +620,12 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⏳ Downloading file...")
         
         try:
-            # Download file
-            file_path = f"uploads\\{filename}"
+            # Download file (use forward slash for Linux/Render)
+            file_path = f"uploads/{filename}"
             file = await context.bot.get_file(document.file_id)
             await file.download_to_drive(file_path)
             
-            # Process file (manual parsing for now)
+            # Process file
             session = SessionLocal()
             try:
                 cards = []
@@ -376,10 +704,20 @@ def main():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("topup", topup))
     application.add_handler(CommandHandler("catalog", catalog))
+    application.add_handler(CommandHandler("bin", bin_lookup))
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("help", help_command))
+    
+    # BIN search handler
+    application.add_handler(MessageHandler(filters.Regex('^/bin '), handle_bin_search))
+    
+    # Callback handlers
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
+    application.add_handler(CallbackQueryHandler(order_bin_callback, pattern="^order_bin_"))
+    
+    # BIN order handler (must be after command handlers)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bin_order))
     
     # Admin handlers
     application.add_handler(CommandHandler("stats", admin_stats))
