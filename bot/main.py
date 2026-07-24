@@ -1,37 +1,101 @@
 import sys
 import io
 import os
+import signal
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from database.models import User, Card, Order, Base
 from config.settings import BOT_TOKEN, USDT_ADDRESS, ADMIN_IDS, DATABASE_URL
 from datetime import datetime
+
+print("🔄 Starting bot initialization...")
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
+# Set startup timeout
+def timeout_handler(signum, frame):
+    print("❌ Startup timeout!")
+    sys.exit(1)
+
+signal.signal(signal.SIGALRM, timeout_handler)
+signal.alarm(45)  # 45 second timeout
+
 # Database
+print("🔄 Connecting to database...")
 engine = create_engine(
     DATABASE_URL, 
     echo=False, 
     pool_pre_ping=True, 
     pool_recycle=3600,
+    pool_size=10,
+    max_overflow=20,
     connect_args={
-        'sslmode': 'require',
+        'sslmode': 'prefer',
         'connect_timeout': 10
     }
 )
 
-Base.metadata.create_all(bind=engine)
+# Test database connection
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    print("✅ Database connected successfully!")
+    signal.alarm(0)  # Cancel timeout
+except Exception as e:
+    print(f"❌ Database connection failed: {e}")
+    sys.exit(1)
+
+# Create tables (only if they don't exist)
+print("🔄 Checking database tables...")
+if not Base.metadata.reflect(bind=engine):
+    Base.metadata.create_all(bind=engine)
+    print("✅ Database tables created!")
+else:
+    print("✅ Database tables already exist!")
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Create uploads directory
+Path("uploads").mkdir(exist_ok=True)
+print("✅ Uploads directory ready!")
+
+# BIN metadata database
+def get_bin_metadata(bin_number: str) -> dict:
+    """Get BIN metadata"""
+    bin_db = {
+        "402020": {
+            "Bank": "STATE EMPLOYEES CREDIT UNION OF MARYLAND, INC.",
+            "Brand": "VISA",
+            "Country": "US",
+            "Card Type": "debit",
+            "Level": "CLASSIC"
+        },
+        "414720": {
+            "Bank": "CHASE BANK",
+            "Brand": "VISA",
+            "Country": "US",
+            "Card Type": "debit",
+            "Level": "CLASSIC"
+        },
+        "524012": {
+            "Bank": "BANK OF AMERICA",
+            "Brand": "MASTERCARD",
+            "Country": "US",
+            "Card Type": "credit",
+            "Level": "STANDARD"
+        }
+    }
+    return bin_db.get(bin_number, {})
 
 async def get_or_create_user(telegram_id: int):
     session = SessionLocal()
@@ -59,6 +123,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check your balance\n"
         "/topup - Get USDT deposit address\n"
         "/catalog - Browse cards\n"
+        "/bin - BIN lookup\n"
         "/history - View purchases\n"
         "/help - Show all commands",
         parse_mode="Markdown"
@@ -115,7 +180,6 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search cards by BIN and show stock by subcategory"""
     session = SessionLocal()
     try:
-        # Extract BIN from command
         command_parts = update.message.text.split(' ')
         if len(command_parts) < 2:
             await update.message.reply_text("❌ Please provide a BIN number.\n\nExample: `/bin 414720`")
@@ -123,21 +187,16 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         bin_number = command_parts[1].strip()
         
-        # Validate BIN (should be 6 digits)
         if not bin_number.isdigit() or len(bin_number) != 6:
             await update.message.reply_text("❌ BIN must be exactly 6 digits.\n\nExample: `/bin 414720`")
             return
         
-        # Get first card to fetch BIN details
-        first_card = session.query(Card).filter(
-            Card.bin == bin_number
-        ).first()
+        first_card = session.query(Card).filter(Card.bin == bin_number).first()
         
         if not first_card:
             await update.message.reply_text(f"📭 No cards found for BIN `{bin_number}`")
             return
         
-        # Count stock by billing status
         clothed_cards = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True,
@@ -152,7 +211,6 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         total_available = clothed_cards + naked_cards
         
-        # Get prices (can be different for clothed vs naked)
         clothed_card = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True
@@ -165,19 +223,15 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clothed_price = clothed_card.price if clothed_card else first_card.price
         naked_price = naked_card.price if naked_card else first_card.price
         
-        # Get BIN metadata
         bin_metadata = get_bin_metadata(bin_number)
         
-        # Build response
         response_text = f"🎴 **BIN: {bin_number}**\n\n"
         
-        # Add BIN metadata
         if bin_metadata:
             for key, value in bin_metadata.items():
                 response_text += f"{key}: `{value}`\n"
             response_text += "\n"
         
-        # Add stock counts with new terms
         response_text += f"📦 **Clothed:** {clothed_cards} @ ${clothed_price} USDT\n"
         response_text += f"📦 **Naked:** {naked_cards} @ ${naked_price} USDT\n\n"
         response_text += f"📊 **Total Available:** {total_available}\n\n"
@@ -186,7 +240,6 @@ async def handle_bin_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(response_text, parse_mode="Markdown")
             return
         
-        # Add order button
         keyboard = [[InlineKeyboardButton(text="🛒 Order Now", callback_data=f"order_bin_{bin_number}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -200,12 +253,10 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     bin_number = query.data.split("_")[2]
     
-    # Store BIN in user data
     context.user_data['selected_bin'] = bin_number
     
     session = SessionLocal()
     try:
-        # Get stock counts again
         clothed_cards = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True,
@@ -218,7 +269,6 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             Card.is_sold == False
         ).count()
         
-        # Get prices
         clothed_card = session.query(Card).filter(
             Card.bin == bin_number,
             Card.billing == True
@@ -231,7 +281,6 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         clothed_price = clothed_card.price if clothed_card else 25.0
         naked_price = naked_card.price if naked_card else 25.0
         
-        # Build order form
         order_text = f"🛒 **Order BIN {bin_number}**\n\n"
         order_text += f"📦 **Clothed:** {clothed_cards} available @ ${clothed_price}\n"
         order_text += f"📦 **Naked:** {naked_cards} available @ ${naked_price}\n\n"
@@ -257,7 +306,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     session = SessionLocal()
     try:
-        # Parse quantities
         quantities = update.message.text.split(' ')
         if len(quantities) < 2:
             await update.message.reply_text("❌ Please enter quantities.\n\nExample: `5,3`")
@@ -265,7 +313,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         qty_input = quantities[1].strip()
         
-        # Parse clothed and naked quantities
         if ',' in qty_input:
             parts = qty_input.split(',')
             clothed_qty = int(parts[0].strip())
@@ -274,7 +321,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clothed_qty = int(qty_input)
             naked_qty = 0
         
-        # Validate quantities
         if clothed_qty < 0 or naked_qty < 0:
             await update.message.reply_text("❌ Quantities cannot be negative.")
             return
@@ -283,7 +329,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Please order at least 1 card.")
             return
         
-        # Check stock availability
         clothed_available = session.query(Card).filter(
             Card.bin == selected_bin,
             Card.billing == True,
@@ -296,7 +341,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             Card.is_sold == False
         ).count()
         
-        # Get prices
         clothed_card = session.query(Card).filter(
             Card.bin == selected_bin,
             Card.billing == True
@@ -309,10 +353,8 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clothed_price = clothed_card.price if clothed_card else 25.0
         naked_price = naked_card.price if naked_card else 25.0
         
-        # Calculate total (BIN-specific pricing)
         total_cost = (clothed_qty * clothed_price) + (naked_qty * naked_price)
         
-        # Check user balance
         if user.balance < total_cost:
             await update.message.reply_text(
                 f"❌ **Insufficient Balance!**\n\n"
@@ -323,7 +365,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Check if enough stock
         if clothed_qty > clothed_available:
             await update.message.reply_text(
                 f"❌ **Not enough Clothed cards!**\n\n"
@@ -340,7 +381,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Create order
         order = Order(
             user_id=user.id,
             amount=total_cost,
@@ -349,10 +389,8 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         session.add(order)
         
-        # Deduct balance
         user.balance -= total_cost
         
-        # Get cards to sell
         clothed_cards_to_sell = session.query(Card).filter(
             Card.bin == selected_bin,
             Card.billing == True,
@@ -388,7 +426,9 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for card in naked_cards_to_sell:
             card.is_sold = True
             card.order_id = order.id
-            txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
+            txt_content += f"{card.number}|{card.expiry}|
+        # Build .TXT file content (continued)
+        txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
         
         txt_content += f"\n\n{'='*50}\n"
         txt_content += f"✅ All cards verified and ready!\n"
@@ -415,44 +455,6 @@ async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     finally:
         session.close()
-
-async def admin_all_cards(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View all cards in database (admin only)"""
-    user = await get_or_create_user(update.effective_user.id)
-    if not user.is_admin:
-        await update.message.reply_text("🔒 Admin command only!")
-        return
-    
-    session = SessionLocal()
-    try:
-        cards = session.query(Card).order_by(Card.created_at.desc()).limit(50).all()
-        
-        if not cards:
-            await update.message.reply_text("📭 No cards found.")
-            return
-        
-        cards_text = "🎴 **All Cards** (Latest 50)\n\n"
-        
-        for card in cards:
-            # Truncate card number to save space
-            cards_text += (
-                f"🆔 `{card.id}` | BIN: {card.bin}\n"
-                f"💳 ****{card.number[-4:]}\n"
-                f"🏷️ ${card.price} | {'🟢' if card.billing else '🔴'}\n"
-                f"🏳️ {card.country} | {'✅ Sold' if card.is_sold else '⚪ Avail'}\n\n"
-            )
-        
-        # Split message if too long
-        if len(cards_text) > 4000:
-            mid = len(cards_text) // 2
-            await update.message.reply_text(cards_text[:mid], parse_mode="Markdown")
-            await update.message.reply_text(cards_text[mid:], parse_mode="Markdown")
-        else:
-            await update.message.reply_text(cards_text, parse_mode="Markdown")
-    
-    finally:
-        session.close()
-
 
 async def country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -513,6 +515,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/balance - Check USDT balance\n"
         "/topup - Get deposit address\n"
         "/catalog - Browse cards by country\n"
+        "/bin - BIN lookup\n"
         "/history - View purchase history\n"
         "/help - Show this message\n\n"
         "*Admin Commands:*\n"
@@ -520,11 +523,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/countries - View cards by country\n"
         "/users - View all users\n"
         "/add_card - Add single card\n"
-        "/upload - Bulk upload cards",
+        "/upload - Bulk upload cards\n"
+        "/edit_price - Edit card prices\n"
+        "/export - Export all cards to file",
         parse_mode="Markdown"
     )
-
-
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View store statistics"""
@@ -569,7 +572,13 @@ async def admin_countries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         stats_text += f"\n📊 **Total:** {session.query(Card).count()} cards"
         
-        await update.message.reply_text(stats_text, parse_mode="Markdown")
+        # Split if too long
+        if len(stats_text) > 4000:
+            mid = len(stats_text) // 2
+            await update.message.reply_text(stats_text[:mid], parse_mode="Markdown")
+            await update.message.reply_text(stats_text[mid:], parse_mode="Markdown")
+        else:
+            await update.message.reply_text(stats_text, parse_mode="Markdown")
     finally:
         session.close()
 
@@ -596,18 +605,16 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💰 ${u.balance} USDT\n\n"
             )
         
-        # Check message length and split if needed
+        # Split if too long
         if len(users_text) > 4000:
-            # Send first half
             mid = len(users_text) // 2
             await update.message.reply_text(users_text[:mid], parse_mode="Markdown")
             await update.message.reply_text(users_text[mid:], parse_mode="Markdown")
         else:
             await update.message.reply_text(users_text, parse_mode="Markdown")
-    
     finally:
         session.close()
-        
+
 async def admin_add_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add single card via command"""
     user = await get_or_create_user(update.effective_user.id)
@@ -628,6 +635,8 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 Admin command only!")
         return
     
+    context.user_data['uploading'] = True
+    
     await update.message.reply_text(
         "📦 **Bulk Upload via Telegram**\n\n"
         "📁 Send a card file (.txt, .csv, .dat, .log)\n"
@@ -636,7 +645,115 @@ async def admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⏳ Waiting for file...",
         parse_mode="Markdown"
     )
-    context.user_data['uploading'] = True
+
+async def admin_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit prices for BINs"""
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    
+    await update.message.reply_text(
+        "📝 **Edit BIN Prices**\n\n"
+        "Usage: /edit_price BIN CLOTHED_PRICE NAKED_PRICE\n\n"
+        "Example: /edit_price 414720 25 20\n\n"
+        "This will update all cards with BIN 414720 to:\n"
+        "- Clothed: $25 USDT\n"
+        "- Naked: $20 USDT"
+    )
+
+async def handle_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process price edit command"""
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    
+    session = SessionLocal()
+    try:
+        parts = update.message.text.split(' ')
+        if len(parts) < 4:
+            await update.message.reply_text("❌ Invalid format.\n\nUsage: /edit_price BIN CLOTHED_PRICE NAKED_PRICE")
+            return
+        
+        bin_number = parts[1].strip()
+        try:
+            clothed_price = float(parts[2].strip())
+            naked_price = float(parts[3].strip())
+        except ValueError:
+            await update.message.reply_text("❌ Prices must be numbers.")
+            return
+        
+        # Update clothed cards
+        clothed_count = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == True
+        ).count()
+        
+        # Update naked cards
+        naked_count = session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == False
+        ).count()
+        
+        # Perform updates
+        session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == True
+        ).update({'price': clothed_price})
+        
+        session.query(Card).filter(
+            Card.bin == bin_number,
+            Card.billing == False
+        ).update({'price': naked_price})
+        
+        session.commit()
+        
+        await update.message.reply_text(
+            f"✅ **Prices Updated!**\n\n"
+            f"🎴 BIN: {bin_number}\n"
+            f"📦 Clothed: {clothed_count} cards @ ${clothed_price}\n"
+            f"📦 Naked: {naked_count} cards @ ${naked_price}",
+            parse_mode="Markdown"
+        )
+    
+    finally:
+        session.close()
+
+async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Export all cards to .txt file"""
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    
+    session = SessionLocal()
+    try:
+        cards = session.query(Card).all()
+        
+        if not cards:
+            await update.message.reply_text("📭 No cards to export.")
+            return
+        
+        # Build file content
+        txt_content = "🎴 CARD EXPORT\n"
+        txt_content += f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        txt_content += f"📊 Total Cards: {len(cards)}\n\n"
+        
+        for card in cards:
+            txt_content += f"{card.id}|{card.bin}|{card.number}|{card.expiry}|{card.cvv}|{card.country}|{card.billing}|{card.price}|{card.is_sold}\n"
+        
+        # Send as file
+        file_bytes = io.BytesIO(txt_content.encode('utf-8'))
+        file_bytes.name = f"cards_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        
+        await update.message.reply_document(
+            document=file_bytes,
+            caption=f"✅ **Export Complete!**\n\n📊 Total Cards: {len(cards)}"
+        )
+    
+    finally:
+        session.close()
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process uploaded card file"""
@@ -646,7 +763,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     if not context.user_data.get('uploading'):
-        return  # Don't process file if not waiting for upload
+        return
     
     document = update.message.document
     filename = document.file_name
@@ -655,15 +772,12 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⏳ Downloading file...")
         
         try:
-            # Create uploads directory BEFORE downloading file
             os.makedirs("uploads", exist_ok=True)
             
-            # Download file
             file_path = f"uploads/{filename}"
             file = await context.bot.get_file(document.file_id)
             await file.download_to_drive(file_path)
             
-            # Process file
             session = SessionLocal()
             try:
                 cards = []
@@ -675,7 +789,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         if not line or line.startswith('#'):
                             continue
                         
-                        # Auto-detect delimiter
                         delimiters = [',', '|', '\t', ' ']
                         delimiter = max(delimiters, key=lambda d: line.count(d))
                         
@@ -700,33 +813,39 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 session.bulk_insert_mappings(Card, [c.__dict__ for c in cards])
                 session.commit()
                 
-                # Get stats
                 total = session.query(Card).count()
                 available = session.query(Card).filter(Card.is_sold == False).count()
                 
                 await update.message.reply_text(
-                     f"✅ **Upload Complete!**\n\n"
-                     f"📊 Cards Uploaded: {success_count}\n"
-                     f"📈 Total Cards: {total}\n"
-                     f"📉 Available: {available}",
-                     parse_mode="Markdown")               
+                    f"✅ **Upload Complete!**\n\n"
+                    f"📊 Cards Uploaded: {success_count}\n"
+                    f"📈 Total Cards: {total}\n"
+                    f"📉 Available: {available}",
+                    parse_mode="Markdown"
                 )
-                
                 context.user_data['uploading'] = False
             
             except Exception as e:
                 import traceback
                 error_msg = traceback.format_exc()
-    
-            # Truncate error message if too long
-            if len(error_msg) > 4000:
-                error_msg = error_msg[:3900] + "...\n[Error message truncated]"
-    
-            await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
-                    context.user_data['uploading'] = False
-                        session.rollback()
+                if len(error_msg) > 3900:
+                    error_msg = error_msg[:3900] + "...\n[Truncated]"
+                await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
+                context.user_data['uploading'] = False
+                session.rollback()
+            finally:
+                session.close()
+        
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            if len(error_msg) > 3900:
+                error_msg = error_msg[:3900] + "...\n[Truncated]"
+            await update.message.reply_text(f"❌ **Download Error:**\n\n{error_msg}")
+            context.user_data['uploading'] = False
+    else:
+        await update.message.reply_text("❌ Unsupported file format. Use .txt or .csv")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors gracefully"""
     logging.error(f"Exception while handling an update: {context.error}")
     if update and update.effective_message:
@@ -745,10 +864,23 @@ def main():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("topup", topup))
     application.add_handler(CommandHandler("catalog", catalog))
+    application.add_handler(CommandHandler("bin", bin_lookup))
     application.add_handler(CommandHandler("history", history))
     application.add_handler(CommandHandler("help", help_command))
+    
+    # BIN search handler
+    application.add_handler(MessageHandler(filters.Regex('^/bin '), handle_bin_search))
+    
+    # Callback handlers
     application.add_handler(CallbackQueryHandler(copy_usdt, pattern="^copy_usdt$"))
     application.add_handler(CallbackQueryHandler(country_callback, pattern="^country_"))
+    application.add_handler(CallbackQueryHandler(order_bin_callback, pattern="^order_bin_"))
+    
+    # File upload handler (MUST be BEFORE text handler)
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
+    
+    # BIN order handler (must be after file upload handler)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_bin_order))
     
     # Admin handlers
     application.add_handler(CommandHandler("stats", admin_stats))
@@ -756,9 +888,8 @@ def main():
     application.add_handler(CommandHandler("users", admin_users))
     application.add_handler(CommandHandler("add_card", admin_add_card))
     application.add_handler(CommandHandler("upload", admin_upload))
-    
-    # File upload handler (must be after command handlers)
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
+    application.add_handler(CommandHandler("edit_price", admin_edit_price))
+    application.add_handler(CommandHandler("export", admin_export))
     
     # Add error handler
     application.add_error_handler(error_handler)
@@ -769,4 +900,11 @@ def main():
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        print("✅ Bot started successfully!")
+    except Exception as e:
+        import traceback
+        print(f"❌ Bot crashed: {e}")
+        traceback.print_exc()
+        sys.exit(1)
