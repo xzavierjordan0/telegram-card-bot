@@ -298,121 +298,165 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
  
 
-async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process uploaded card file with smart parser"""
+async def handle_bin_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process BIN order with quantities and deliver .TXT file"""
     user = await get_or_create_user(update.effective_user.id)
-    if not user.is_admin:
-        await update.message.reply_text("🔒 Admin command only!")
+    selected_bin = context.user_data.get('selected_bin')
+    
+    if not selected_bin:
+        await update.message.reply_text("❌ No BIN selected. Use `/bin` first.")
         return
-    
-    if not context.user_data.get('uploading'):
-        return
-    
-    document = update.message.document
-    filename = document.file_name
-    
-    if filename.endswith(('.txt', '.csv', '.dat', '.log', '.tsv')):
-        await update.message.reply_text("⏳ Downloading file...")
-        
-        try:
-            # Create uploads directory
-            os.makedirs("uploads", exist_ok=True)
-            
-            # Download file
-            file_path = f"uploads/{filename}"
-            file = await context.bot.get_file(document.file_id)
-            await file.download_to_drive(file_path)
-            
-            # Parse file with smart parser
-            parser = CardParser()
-            cards, stats = parser.parse_file(file_path)
-            
-            print(f"📊 Parsed {len(cards)} cards from file")
-            
-            # Send parsing summary
-            await update.message.reply_text(parser.get_summary(), parse_mode="Markdown")
-            
-            if not cards:
-                await update.message.reply_text("❌ No cards found in file. Please check format.")
-                context.user_data['uploading'] = False
-                return
-            
-            # Insert cards into database
-            session = SessionLocal()
-            try:
-                card_objects = []
-                for card_data in cards:
-                    card = Card(
-                        bin=card_data['bin'],
-                        number=card_data['number'],
-                        expiry=card_data['expiry'],
-                        cvv=card_data['cvv'],
-                        country=card_data['country'],
-                        billing=card_data['billing'],
-                        price=card_data['price'],
-                        is_sold=False
-                    )
-                    card_objects.append(card)
-                
-                session.bulk_insert_mappings(Card, [c.__dict__ for c in card_objects])
-                session.commit()
-                
-                # Get stats
-                total = session.query(Card).count()
-                available = session.query(Card).filter(Card.is_sold == False).count()
-                
-                await update.message.reply_text(
-                    f"✅ **Upload Complete!**\n\n"
-                    f"📊 Cards Uploaded: {len(cards)}\n"
-                    f"📦 Clothed: {stats['clothed_count']}\n"
-                    f"📦 Naked: {stats['naked_count']}\n"
-                    f"📈 Total Cards: {total}\n"
-                    f"📉 Available: {available}",
-                    parse_mode="Markdown"
-                )
-                context.user_data['uploading'] = False
-            
-            finally:
-                session.close()
-        
-        except Exception as e:
-            import traceback
-            error_msg = traceback.format_exc()
-            if len(error_msg) > 3900:
-                error_msg = error_msg[:3900] + "...\n[Truncated]"
-            await update.message.reply_text(f"❌ **Upload Error:**\n\n{error_msg}")
-            context.user_data['uploading'] = False
-    else:
-        await update.message.reply_text("❌ Unsupported file format. Use .txt or .csv")
-
-
-async def country_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    country_code = query.data.split("_")[1]
     
     session = SessionLocal()
     try:
-        if country_code == "ALL":
-            cards = session.query(Card).filter(Card.is_sold == False).limit(5).all()
-        else:
-            cards = session.query(Card).filter(Card.country == country_code, Card.is_sold == False).limit(5).all()
-        
-        if not cards:
-            await query.answer(f"📭 No {country_code} cards available.", show_alert=True)
+        quantities = update.message.text.split(' ')
+        if len(quantities) < 2:
+            await update.message.reply_text("❌ Please enter quantities.\n\nExample: `5,3`")
             return
         
-        card_text = f"🎴 **{country_code} Cards Available**\n\n"
-        for card in cards:
-            card_text += (
-                f"🆔 ID: `{card.id}`\n"
-                f"🏦 BIN: `{card.bin}`\n"
-                f"💳 ****{card.number[-4:]}\n"
-                f"🏷️ Price: ${card.price} USDT\n\n"
-            )
+        qty_input = quantities[1].strip()
         
-        await query.edit_message_text(card_text, parse_mode="Markdown")
+        if ',' in qty_input:
+            parts = qty_input.split(',')
+            clothed_qty = int(parts[0].strip())
+            naked_qty = int(parts[1].strip())
+        else:
+            clothed_qty = int(qty_input)
+            naked_qty = 0
+        
+        if clothed_qty < 0 or naked_qty < 0:
+            await update.message.reply_text("❌ Quantities cannot be negative.")
+            return
+        
+        if clothed_qty == 0 and naked_qty == 0:
+            await update.message.reply_text("❌ Please order at least 1 card.")
+            return
+        
+        clothed_available = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == True,
+            Card.is_sold == False
+        ).count()
+        
+        naked_available = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == False,
+            Card.is_sold == False
+        ).count()
+        
+        clothed_card = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == True
+        ).first()
+        naked_card = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == False
+        ).first()
+        
+        clothed_price = clothed_card.price if clothed_card else 25.0
+        naked_price = naked_card.price if naked_card else 25.0
+        
+        total_cost = (clothed_qty * clothed_price) + (naked_qty * naked_price)
+        
+        if user.balance < total_cost:
+            await update.message.reply_text(
+                f"❌ **Insufficient Balance!**\n\n"
+                f"💰 Your Balance: `{user.balance} USDT`\n"
+                f"💰 Required: `{total_cost:.2f} USDT`\n\n"
+                f"Use `/topup` to add funds.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        if clothed_qty > clothed_available:
+            await update.message.reply_text(
+                f"❌ **Not enough Clothed cards!**\n\n"
+                f"📊 Available: {clothed_available}\n"
+                f"📊 You requested: {clothed_qty}"
+            )
+            return
+        
+        if naked_qty > naked_available:
+            await update.message.reply_text(
+                f"❌ **Not enough Naked cards!**\n\n"
+                f"📊 Available: {naked_available}\n"
+                f"📊 You requested: {naked_qty}"
+            )
+            return
+        
+        order = Order(
+            user_id=user.id,
+            amount=total_cost,
+            status="completed",
+            details=f"BIN {selected_bin} - {clothed_qty} Clothed, {naked_qty} Naked"
+        )
+        session.add(order)
+        
+        user.balance -= total_cost
+        
+        clothed_cards_to_sell = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == True,
+            Card.is_sold == False
+        ).limit(clothed_qty).all()
+        
+        naked_cards_to_sell = session.query(Card).filter(
+            Card.bin == selected_bin,
+            Card.billing == False,
+            Card.is_sold == False
+        ).limit(naked_qty).all()
+        
+        # Build .TXT file content
+        txt_content = f"🎴 CARD DELIVERY - Order #{order.id}\n"
+        txt_content += f"📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        txt_content += f"🆔 User: {user.telegram_id}\n"
+        txt_content += f"🎴 BIN: {selected_bin}\n"
+        txt_content += f"📊 Total Cards: {len(clothed_cards_to_sell) + len(naked_cards_to_sell)}\n"
+        txt_content += f"💰 Total Cost: ${total_cost:.2f} USDT\n\n"
+        txt_content += f"{'='*50}\n\n"
+        txt_content += f"📦 CLOTHED ({len(clothed_cards_to_sell)} cards)\n"
+        txt_content += f"{'-'*50}\n"
+        
+        for card in clothed_cards_to_sell:
+            card.is_sold = True
+            card.order_id = order.id
+            txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
+        
+        txt_content += f"\n{'='*50}\n\n"
+        txt_content += f"📦 NAKED ({len(naked_cards_to_sell)} cards)\n"
+        txt_content += f"{'-'*50}\n"
+        
+        for card in naked_cards_to_sell:
+            card.is_sold = True
+            card.order_id = order.id
+            txt_content += f"{card.number}|{card.expiry}|{card.cvv}\n"
+        
+        txt_content += f"\n\n{'='*50}\n"
+        txt_content += f"✅ All cards verified and ready!\n"
+        
+        session.commit()
+        
+        # Create .TXT file and send to user
+        file_bytes = io.BytesIO(txt_content.encode('utf-8'))
+        file_bytes.name = f"order_{order.id}_{selected_bin}.txt"
+        
+        await update.message.reply_document(
+            document=file_bytes,
+            caption=f"✅ **Order #{order.id} Complete!**\n\n"
+                   f"🎴 BIN: {selected_bin}\n"
+                   f"📦 Clothed: {len(clothed_cards_to_sell)} cards\n"
+                   f"📦 Naked: {len(naked_cards_to_sell)} cards\n"
+                   f"💰 Total: ${total_cost:.2f} USDT\n"
+                   f"💰 New Balance: `{user.balance} USDT`",
+            parse_mode="Markdown"
+        )
+        
+        # Clear user data
+        context.user_data.pop('selected_bin', None)
+    
     finally:
         session.close()
+
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"✅ /history received from {update.effective_user.username}")
