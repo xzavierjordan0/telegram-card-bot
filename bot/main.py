@@ -585,3 +585,8 @@ if __name__ == "__main__":
     try:
         main()
         print("✅ Bot started successfully!")
+    except Exception as e:
+        import traceback
+        print(f"❌ Bot crashed: {e}")
+        traceback.print_exc()
+        sys.exit(1)
