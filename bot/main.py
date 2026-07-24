@@ -456,6 +456,34 @@ async def admin_countries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(stats_text, parse_mode="Markdown")
     finally:
         session.close()
+        
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all users (admin only)"""
+    user = await get_or_create_user(update.effective_user.id)
+    if not user.is_admin:
+        await update.message.reply_text("🔒 Admin command only!")
+        return
+    
+    session = SessionLocal()
+    try:
+        users = session.query(User).order_by(User.created_at.desc()).limit(20).all()
+        
+        if not users:
+            await update.message.reply_text("📭 No users found.")
+            return
+        
+        users_text = "👥 **All Users** (Latest 20)\n\n"
+        for u in users:
+            users_text += (
+                f"🆔 `{u.telegram_id}`\n"
+                f"👤 @{u.username or 'N/A'}\n"
+                f"💰 ${u.balance} USDT\n"
+                f"📅 Joined: {u.created_at.strftime('%Y-%m-%d')}\n\n"
+            )
+        
+        await update.message.reply_text(users_text, parse_mode="Markdown")
+    finally:
+        session.close()
 
 def main():
     print("✅ Starting bot...")
