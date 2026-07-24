@@ -296,7 +296,7 @@ async def order_bin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     finally:
         session.close()
 
-afrom parse_cards import CardParser
+ 
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process uploaded card file with smart parser"""
